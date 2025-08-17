@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # --- INFRASTRUCTURE SERVICES ---
   minio:
@@ -77,8 +75,6 @@ services:
     networks:
       - data_network
 
-  # LE SERVICE 'extraction' A ETE SUPPRIME CAR IL TOURNE EN LOCAL
-
   spark-app:
     build:
       context: .
@@ -87,13 +83,16 @@ services:
     depends_on:
       - spark-master
       - minio
-      - migrations # Le traitement attend que la BDD soit prête
+      - migrations
     env_file: .env
-    command: >
-      spark-submit --master spark://spark-master:7077 \
-      --driver-class-path /opt/bitnami/spark/jars/postgresql-42.7.3.jar \
-      --jars /opt/bitnami/spark/jars/postgresql-42.7.3.jar \
-      src/processing/spark_job.py
+    # --- CORRECTION : Utilisation du format liste pour la commande ---
+    command: [
+        "spark-submit",
+        "--master", "spark://spark-master:7077",
+        "--driver-class-path", "/opt/bitnami/spark/jars/postgresql-42.7.3.jar",
+        "--jars", "/opt/bitnami/spark/jars/postgresql-42.7.3.jar",
+        "src/processing/spark_job.py"
+    ]
     networks:
       - data_network
 
