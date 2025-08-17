@@ -1,0 +1,16 @@
+# Git and environment files
+.git
+.gitignore
+.env
+
+# Python cache and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+.venv
+venv/
+env/
+
+# Local data and artifacts
+data/
+*.ipynb

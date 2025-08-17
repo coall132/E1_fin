@@ -1,0 +1,21 @@
+FROM bitnami/spark:3.5
+
+USER root
+
+# Install Python and dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3-pip python3-dev gcc libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# --- IMPORTANT: ADD POSTGRESQL DRIVER ---
+# Download the PostgreSQL JDBC driver so Spark can connect to the database.
+RUN curl -L -o /opt/bitnami/spark/jars/postgresql-42.7.3.jar https://jdbc.postgresql.org/download/postgresql-42.7.3.jar
+
+COPY . .
+
+# Add the app to the Python path
+ENV PYTHONPATH=/app

@@ -1,0 +1,8 @@
+# Inclut toutes les dépendances nécessaires pour Docker
+-r requirements.txt
+
+selenium
+beautifulsoup4
+undetected-chromedriver
+requests
+python-dotenv

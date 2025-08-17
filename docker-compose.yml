@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  # --- INFRASTRUCTURE SERVICES ---
+  minio:
+    image: minio/minio
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      - MINIO_ROOT_USER=${AWS_ACCESS_KEY_ID}
+      - MINIO_ROOT_PASSWORD=${AWS_SECRET_KEY}
+    command: server /data --console-address ":9001"
+    networks:
+      - data_network
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    networks:
+      - data_network
+    restart: always
+
+  # --- SPARK CLUSTER ---
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: spark-master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    environment:
+      - SPARK_MODE=master
+    networks:
+      - data_network
+
+  spark-worker:
+    image: bitnami/spark:3.5
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    networks:
+      - data_network
+
+  # --- APPLICATION SERVICES ---
+  migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: migrations
+    depends_on:
+      - postgres
+    env_file: .env
+    command: >
+      bash -c "
+        until pg_isready -h postgres -p 5432 -U ${POSTGRES_USER}; do
+          echo 'Waiting for database...';
+          sleep 2;
+        done;
+        alembic upgrade head
+      "
+    networks:
+      - data_network
+
+  # LE SERVICE 'extraction' A ETE SUPPRIME CAR IL TOURNE EN LOCAL
+
+  spark-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    container_name: spark-app
+    depends_on:
+      - spark-master
+      - minio
+      - migrations # Le traitement attend que la BDD soit prête
+    env_file: .env
+    command: >
+      spark-submit --master spark://spark-master:7077 \
+      --driver-class-path /opt/bitnami/spark/jars/postgresql-42.7.3.jar \
+      --jars /opt/bitnami/spark/jars/postgresql-42.7.3.jar \
+      src/processing/spark_job.py
+    networks:
+      - data_network
+
+networks:
+  data_network:
+    driver: bridge
+
+volumes:
+  pg_data:
+  minio_data:

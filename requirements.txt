@@ -1,0 +1,11 @@
+# MinIO & AWS
+minio
+boto3
+
+# Database
+sqlalchemy
+psycopg2-binary
+alembic
+
+# Spark
+pyspark==3.5.0
