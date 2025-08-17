@@ -1,5 +1,4 @@
 services:
-  # --- INFRASTRUCTURE SERVICES ---
   minio:
     image: minio/minio
     container_name: minio
@@ -19,7 +18,7 @@ services:
     image: postgres:15
     container_name: postgres
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     environment:
@@ -29,6 +28,11 @@ services:
     networks:
       - data_network
     restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # --- SPARK CLUSTER ---
   spark-master:
@@ -55,25 +59,6 @@ services:
     networks:
       - data_network
 
-  # --- APPLICATION SERVICES ---
-  migrations:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: migrations
-    depends_on:
-      - postgres
-    env_file: .env
-    command: >
-      bash -c "
-        until pg_isready -h postgres -p 5432 -U ${POSTGRES_USER}; do
-          echo 'Waiting for database...';
-          sleep 2;
-        done;
-        alembic upgrade head
-      "
-    networks:
-      - data_network
 
   spark-app:
     build:
@@ -81,11 +66,13 @@ services:
       dockerfile: Dockerfile.spark
     container_name: spark-app
     depends_on:
-      - spark-master
-      - minio
-      - migrations
+      postgres:
+        condition: service_healthy # Attend que la BDD soit prête
+      spark-master:
+        condition: service_started
+      minio:
+        condition: service_started
     env_file: .env
-    # --- CORRECTION : Utilisation du format liste pour la commande ---
     command: [
         "spark-submit",
         "--master", "spark://spark-master:7077",
