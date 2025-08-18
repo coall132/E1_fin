@@ -52,8 +52,8 @@ def get_existing_files(prefix: str) -> set:
 
 # --- SCRIPT PRINCIPAL ---
 def main():
-    liste_departement = [37]
-    liste_activite = ["Restaurants"] #muséee, hotel
+    liste_departement = [49,72,61,27,78,91,92,93,94,77,89,58,3,23,87,86,79]
+    liste_activite = ["musée"] #musée(41,45,28,18,36,37), hotel
     
     print("--- Démarrage de l'extraction de données (Local) ---")
     
@@ -73,7 +73,7 @@ def main():
                 if nom == 'sans_nom' or adresse == 'sans_adresse':
                     continue
 
-                file_identifier = f"{nom}_-_{adresse}.json"
+                file_identifier = f"{nom}_-_{adresse}-_-{activite}.json"
                 print(f"Traitement de l'établissement : {item.get('nom')}")
 
                 # 1. Traitement Pages Jaunes

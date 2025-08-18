@@ -21,6 +21,8 @@ class Etablissement(Base):
     editorialSummary_text = Column(Text)
     google_place_id = Column(String(255), unique=True) # Identifiant unique de Google
     
+    #nom_file = Column(Text)
+    #activite = Column(Text)
     # Relations
     options = relationship("Options", back_populates="etab", uselist=False, cascade="all, delete-orphan")
     reviews = relationship("Review", back_populates="etab", cascade="all, delete-orphan")

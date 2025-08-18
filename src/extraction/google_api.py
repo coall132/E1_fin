@@ -5,7 +5,7 @@ import requests
 import re
 
 # Seuil maximal de requêtes par mois
-MAX_REQUESTS = 3000
+MAX_REQUESTS = 4000
 FILE_PATH = 'request_counter.json'
 
 def load_request_count():

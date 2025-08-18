@@ -71,7 +71,7 @@ def scrapping_page_jaune(activite, dep):
         soup = BeautifulSoup(driver.page_source, "html.parser")
         nb_page = find_nb_page(soup)
         print(f"{nb_page} page(s) à scraper pour '{activite}'.")
-        for page in range(1, min(nb_page + 1, 2)):
+        for page in range(1, min(nb_page + 1, nb_page)):
             if page > 1:
                 driver.get(f"{url_base}&page={page}")
                 time.sleep(random.uniform(2, 4))

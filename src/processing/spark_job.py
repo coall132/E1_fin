@@ -183,13 +183,12 @@ def main():
             col("editorialSummary.text").alias("editorialSummary_text"),
             col("name").alias("google_place_id"),
         )
-        # Ajout important : supprimer les doublons potentiels DANS les nouvelles données
         .dropDuplicates(["google_place_id"])
     )
 
-    # --- Logique anti-doublons ---
+    
 
-    # 1. Lire les IDs qui existent déjà dans la base de données
+    # --- Logique anti-doublons ---
     print("Lecture des IDs existants dans la table 'etab'...")
     try:
         existing_ids_df = spark.read.jdbc(
@@ -198,34 +197,25 @@ def main():
             properties=db_properties,
         )
     except Exception as e:
-        # Si la table est vide la première fois, une erreur peut survenir.
-        # On crée un DataFrame vide avec le bon schéma pour que la jointure fonctionne.
         print("La table 'etab' est probablement vide. On continue...")
         existing_ids_df = spark.createDataFrame([], StructType([StructField("google_place_id", StringType(), False)]))
 
-
-    # 2. Filtrer les nouvelles données pour ne garder que ce qui n'existe pas déjà
     to_insert_df = etablissement_df.join(
         existing_ids_df, on="google_place_id", how="left_anti"
     )
 
-    # 3. Écrire les nouvelles données filtrées
-    print("Tentative d'insertion des nouvelles lignes...")
+    print("Tentative d'insertion des nouvelles lignes dans 'etab'...")
     to_insert_df.write.jdbc(
         url=db_url, 
         table="etab", 
-        # Le mode 'ignore' est une sécurité : si un doublon arrive quand même, il sera ignoré sans faire planter le job.
-        mode="ignore", 
+        mode="append", 
         properties=db_properties
     )
     
-    # Pour compter, il vaut mieux le faire après l'écriture pour ne pas déclencher deux "actions" Spark
     inserted_count = to_insert_df.count()
     print(f"✅ {inserted_count} nouvelle(s) ligne(s) insérée(s) dans 'etab'.")
 
     # --- FIN DE LA LOGIQUE ---
-
-    # --- ÉTAPE DE DIAGNOSTIC ---
     print("--- Vérification des données dans la table 'etab' depuis Spark ---")
     etab_from_db_df = spark.read.jdbc(url=db_url, table="etab", properties=db_properties)
     print(f"Il y a maintenant {etab_from_db_df.count()} lignes au total dans la table 'etab'.")
@@ -234,20 +224,12 @@ def main():
     etab_with_ids_df = etab_from_db_df.select("id_etab", "google_place_id")
 
     # === 2.3 Options ===
+    print("Traitement de la table 'options'...")
     option_cols = [
-        "allowsDogs",
-        "delivery",
-        "goodForChildren",
-        "goodForGroups",
-        "goodForWatchingSports",
-        "outdoorSeating",
-        "reservable",
-        "restroom",
-        "servesVegetarianFood",
-        "servesBrunch",
-        "servesBreakfast",
-        "servesDinner",
-        "servesLunch",
+        "allowsDogs", "delivery", "goodForChildren", "goodForGroups",
+        "goodForWatchingSports", "outdoorSeating", "reservable", "restroom",
+        "servesVegetarianFood", "servesBrunch", "servesBreakfast",
+        "servesDinner", "servesLunch",
     ]
     existing_option_cols = [c for c in option_cols if c in google_df.columns]
 
@@ -261,21 +243,39 @@ def main():
         options_df = options_df.filter(filter_condition)
 
         if not options_df.rdd.isEmpty():
-            options_to_insert = options_df.join(
+            options_to_insert_base = options_df.join(
                 etab_with_ids_df, "google_place_id"
             ).drop("google_place_id")
-            options_to_insert.write.jdbc(
-                url=db_url, table="options", mode="ignore", properties=db_properties
+
+            # --- Logique anti-doublons pour 'options' ---
+            try:
+                existing_options_df = spark.read.jdbc(
+                    url=db_url, table="(select id_etab from options) as opt", properties=db_properties
+                )
+            except Exception:
+                print("La table 'options' est probablement vide. On continue...")
+                existing_options_df = spark.createDataFrame([], StructType([StructField("id_etab", IntegerType(), False)]))
+            
+            final_options_to_insert = options_to_insert_base.join(
+                existing_options_df, on="id_etab", how="left_anti"
             )
-            print(
-                f"Successfully wrote/ignored {options_to_insert.count()} rows to 'options' table."
-            )
+            # --- Fin de la logique anti-doublons ---
+
+            inserted_count = final_options_to_insert.count()
+            if inserted_count > 0:
+                final_options_to_insert.write.jdbc(
+                    url=db_url, table="options", mode="append", properties=db_properties
+                )
+                print(f"✅ {inserted_count} nouvelle(s) ligne(s) insérée(s) dans 'options'.")
+            else:
+                print("Aucune nouvelle option à insérer.")
         else:
-            print("No rows with option data found to insert.")
+            print("Aucune ligne avec des données d'options trouvée.")
     else:
-        print("No option-related columns found in source data.")
+        print("Aucune colonne relative aux options trouvée dans les données source.")
 
     # === 2.4 Reviews ===
+    print("Traitement de la table 'reviews'...")
     if "reviews" in google_df.columns:
         reviews_df = (
             google_df.select(col("name").alias("google_place_id"), explode("reviews").alias("review"))
@@ -292,35 +292,48 @@ def main():
             .drop("google_place_id")
         )
 
-        reviews_df.write.jdbc(
-            url=db_url, table="reviews", mode="ignore", properties=db_properties
+        # --- Logique anti-doublons pour 'reviews' ---
+        # Clé unique composite : un même auteur ne peut pas poster 2 avis au même endroit à la même milliseconde
+        unique_keys = ["id_etab", "author", "publishTime"]
+        try:
+            existing_reviews_df = spark.read.jdbc(
+                url=db_url, table=f"(select {', '.join(unique_keys)} from reviews) as rev", properties=db_properties
+            )
+        except Exception:
+            print("La table 'reviews' est probablement vide. On continue...")
+            existing_reviews_df = spark.createDataFrame([], reviews_df.select(*unique_keys).schema)
+
+        final_reviews_to_insert = reviews_df.join(
+            existing_reviews_df, on=unique_keys, how="left_anti"
         )
-        print(f"Successfully wrote {reviews_df.count()} new rows to 'reviews' table.")
+        # --- Fin de la logique anti-doublons ---
+
+        inserted_count = final_reviews_to_insert.count()
+        if inserted_count > 0:
+            final_reviews_to_insert.write.jdbc(
+                url=db_url, table="reviews", mode="append", properties=db_properties
+            )
+            print(f"✅ {inserted_count} nouvelle(s) ligne(s) insérée(s) dans 'reviews'.")
+        else:
+            print("Aucun nouvel avis à insérer.")
 
     # === 2.5 Opening Periods ===
     if "regularOpeningHours" in google_df.columns:
         print("Traitement des périodes d'ouverture...")
-        
-        # 1. Isoler les données nécessaires et filtrer en amont
         hours_to_process = google_df.select(
             col("name").alias("google_place_id"),
             col("regularOpeningHours")
         ).filter(col("regularOpeningHours.periods").isNotNull())
 
-        # 2. Joindre AVANT d'exploser pour récupérer la clé étrangère (id_etab)
-        # On utilise une jointure "inner" pour ne garder que les horaires des établissements
-        # qui ont bien été insérés dans la table "etab".
         hours_with_fk = hours_to_process.join(
             etab_with_ids_df,
             "google_place_id",
             "inner"
         )
 
-        # 3. Exploser les périodes et sélectionner les colonnes finales
-        # Maintenant, chaque période est directement associée au bon "id_etab"
         opening_periods_df = (
             hours_with_fk.select(
-                "id_etab", # On utilise directement la clé étrangère
+                "id_etab",
                 explode("regularOpeningHours.periods").alias("period")
             )
             .select(
@@ -333,11 +346,25 @@ def main():
                 col("period.close.minute").cast(IntegerType()).alias("close_minute"),
             )
         )
+        
+        # --- Logique anti-doublons pour 'opening_period' ---
+        period_keys = ["id_etab", "open_day", "open_hour", "open_minute", "close_day", "close_hour", "close_minute"]
+        try:
+            existing_periods_df = spark.read.jdbc(
+                url=db_url, table=f"(select {', '.join(period_keys)} from opening_period) as op", properties=db_properties
+            )
+        except Exception:
+            print("La table 'opening_period' est probablement vide. On continue...")
+            existing_periods_df = spark.createDataFrame([], opening_periods_df.schema)
+            
+        final_periods_to_insert = opening_periods_df.join(
+            existing_periods_df, on=period_keys, how="left_anti"
+        )
+        # --- Fin de la logique anti-doublons ---
 
-        # 4. Écrire en base de données
-        inserted_count = opening_periods_df.count()
+        inserted_count = final_periods_to_insert.count()
         if inserted_count > 0:
-            opening_periods_df.write.jdbc(
+            final_periods_to_insert.write.jdbc(
                 url=db_url,
                 table="opening_period",
                 mode="append",
