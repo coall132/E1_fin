@@ -1,7 +1,7 @@
 import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, explode, input_file_name, regexp_replace, split, element_at
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, ArrayType, BooleanType, LongType
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, ArrayType, BooleanType, LongType, FloatType, IntegerType
 from minio import Minio
 from src.database.models import init_db
 
@@ -9,7 +9,6 @@ google_api_schema = StructType([
     StructField("name", StringType(), True),
     StructField("internationalPhoneNumber", StringType(), True),
     StructField("formattedAddress", StringType(), True),
-    StructField("description", StringType(), True),
     StructField("websiteUri", StringType(), True),
     StructField("location", StructType([
         StructField("latitude", DoubleType(), True),
@@ -87,6 +86,20 @@ def main():
     minio_client = Minio("minio:9000", access_key=os.getenv("AWS_ACCESS_KEY_ID"), secret_key=os.getenv("AWS_SECRET_KEY"), secure=False)
     ensure_bucket_exists(minio_client, "datalake")
 
+    # --- ÉTAPE DE DIAGNOSTIC ---
+    print("--- Listing objects in MinIO directly ---")
+    try:
+        objects = minio_client.list_objects("datalake", prefix="raw/API_google/", recursive=True)
+        object_list = [obj.object_name for obj in objects]
+        if not object_list:
+            print("MinIO client found NO objects in raw/API_google/")
+        else:
+            print(f"MinIO client found {len(object_list)} objects:")
+    except Exception as e:
+        print(f"Error listing objects with MinIO client: {e}")
+    print("-----------------------------------------")
+    # --- FIN DE L'ÉTAPE DE DIAGNOSTIC ---
+
     spark = SparkSession.builder \
         .appName("MinIO to Postgres") \
         .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000") \
@@ -97,12 +110,12 @@ def main():
         .getOrCreate()
 
     db_url = f"jdbc:postgresql://postgres:5432/{os.getenv('POSTGRES_DB')}"
-    db_properties = {"user": os.getenv("POSTGRES_USER"), "password": os.getenv("POSTGRES_PASSWORD"), "driver": "org.postgresql.Driver"}
+    db_properties = {"user": os.getenv("POSTGRES_USER"), "password": os.getenv("POSTGRES_PASSWORD"), "driver": "org.postgresql.Driver","tcpKeepAlive": "true"}
 
     # --- 1. Read Raw Data ---
     try:
         # CORRECTION : Lecture plus flexible des fichiers
-        google_df = spark.read.option("multiLine", "true").schema(google_api_schema).json("s3a://datalake/raw/API_google/")
+        google_df = spark.read.option("multiLine", "true").option("recursiveFileLookup", "true").schema(google_api_schema).json("s3a://datalake/raw/API_google/")
         
         if google_df.rdd.isEmpty():
             print("No data found in MinIO. Exiting.")
@@ -110,7 +123,7 @@ def main():
             return
         print(f"Found {google_df.count()} records in MinIO.")
 
-        pj_df = spark.read.option("multiLine", "true").schema(pj_schema).json(f"s3a://datalake/raw/page_jaune/") \
+        pj_df = spark.read.option("multiLine", "true").option("recursiveFileLookup", "true").schema(pj_schema).json(f"s3a://datalake/raw/page_jaune/") \
             .withColumn("filename_full", element_at(split(input_file_name(), "/"), -1)) \
             .withColumn("filename", regexp_replace(col("filename_full"), ".json", ""))
         
@@ -133,19 +146,27 @@ def main():
         col("formattedAddress").alias("adresse"),
         col("description"),
         col("websiteUri"),
-        col("location.latitude").alias("latitude"),
-        col("location.longitude").alias("longitude"),
+        col("location.latitude").cast(FloatType()).alias("latitude"),
+        col("location.longitude").cast(FloatType()).alias("longitude"),
         col("rating"),
         col("priceLevel"),
-        col("priceRange.startPrice.units").alias("start_price"),
-        col("priceRange.endPrice.units").alias("end_price"),
+        col("priceRange.startPrice.units").cast(FloatType()).alias("start_price"),
+        col("priceRange.endPrice.units").cast(FloatType()).alias("end_price"),
         col("editorialSummary.text").alias("editorialSummary_text"),
         col("name").alias("google_place_id")
     ).distinct()
-
+    
     # CORRECTION : Utiliser le mode "ignore" pour éviter les erreurs de duplication
     etablissement_df.write.jdbc(url=db_url, table="etab", mode="ignore", properties=db_properties)
     print(f"Successfully wrote/ignored {etablissement_df.count()} rows to 'etab' table.")
+
+    # --- ÉTAPE DE DIAGNOSTIC ---
+    print("--- Verifying data in 'etab' table from Spark ---")
+    print(etablissement_df)
+    etab_with_ids_df = spark.read.jdbc(url=db_url, table="etab", properties=db_properties)
+    print(f"Found {etab_with_ids_df.count()} rows in 'etab' table after write.")
+    etab_with_ids_df.show(truncate=False)
+    # --- FIN DE L'ÉTAPE DE DIAGNOSTIC ---
 
     # === 2.2 Get Generated IDs ===
     etab_with_ids_df = spark.read.jdbc(url=db_url, table="etab", properties=db_properties).select("id_etab", "google_place_id")
@@ -171,7 +192,7 @@ def main():
                 col("review.originalText.languageCode").alias("original_languageCode"),
                 col("review.originalText.text").alias("original_text"),
                 col("review.publishTime"),
-                col("review.rating"),
+                col("review.rating").cast(FloatType()),
                 col("review.relativePublishTimeDescription"),
                 col("review.authorAttribution.displayName").alias("author")
             ).join(etab_with_ids_df, "google_place_id").drop("google_place_id")
@@ -184,12 +205,12 @@ def main():
         opening_periods_df = google_df.select(col("name").alias("google_place_id"), explode("regularOpeningHours.periods").alias("period")) \
             .select(
                 "google_place_id",
-                col("period.open.day").alias("open_day"),
-                col("period.open.hour").alias("open_hour"),
-                col("period.open.minute").alias("open_minute"),
-                col("period.close.day").alias("close_day"),
-                col("period.close.hour").alias("close_hour"),
-                col("period.close.minute").alias("close_minute")
+                col("period.open.day").cast(IntegerType()).alias("open_day"),
+                col("period.open.hour").cast(IntegerType()).alias("open_hour"),
+                col("period.open.minute").cast(IntegerType()).alias("open_minute"),
+                col("period.close.day").cast(IntegerType()).alias("close_day"),
+                col("period.close.hour").cast(IntegerType()).alias("close_hour"),
+                col("period.close.minute").cast(IntegerType()).alias("close_minute")
             ).join(etab_with_ids_df, "google_place_id").drop("google_place_id")
             
         opening_periods_df.write.jdbc(url=db_url, table="opening_period", mode="append", properties=db_properties)
