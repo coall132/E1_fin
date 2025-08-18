@@ -182,31 +182,56 @@ def main():
             col("priceRange.endPrice.units").cast(FloatType()).alias("end_price"),
             col("editorialSummary.text").alias("editorialSummary_text"),
             col("name").alias("google_place_id"),
-        ).distinct()
+        )
+        # Ajout important : supprimer les doublons potentiels DANS les nouvelles données
+        .dropDuplicates(["google_place_id"])
     )
 
-    # ANTI-DUPLICATION: lire les ids existants puis anti-join avant insert
-    existing_ids_df = spark.read.jdbc(
-        url=db_url,
-        table="(select google_place_id from etab) as et",
-        properties=db_properties,
+    # --- Logique anti-doublons ---
+
+    # 1. Lire les IDs qui existent déjà dans la base de données
+    print("Lecture des IDs existants dans la table 'etab'...")
+    try:
+        existing_ids_df = spark.read.jdbc(
+            url=db_url,
+            table="(select google_place_id from etab) as et",
+            properties=db_properties,
+        )
+    except Exception as e:
+        # Si la table est vide la première fois, une erreur peut survenir.
+        # On crée un DataFrame vide avec le bon schéma pour que la jointure fonctionne.
+        print("La table 'etab' est probablement vide. On continue...")
+        existing_ids_df = spark.createDataFrame([], StructType([StructField("google_place_id", StringType(), False)]))
+
+
+    # 2. Filtrer les nouvelles données pour ne garder que ce qui n'existe pas déjà
+    to_insert_df = etablissement_df.join(
+        existing_ids_df, on="google_place_id", how="left_anti"
     )
 
-    to_insert = (
-        etablissement_df.dropDuplicates(["google_place_id"])\
-            .join(existing_ids_df, on="google_place_id", how="left_anti")
+    # 3. Écrire les nouvelles données filtrées
+    print("Tentative d'insertion des nouvelles lignes...")
+    to_insert_df.write.jdbc(
+        url=db_url, 
+        table="etab", 
+        # Le mode 'ignore' est une sécurité : si un doublon arrive quand même, il sera ignoré sans faire planter le job.
+        mode="ignore", 
+        properties=db_properties
     )
+    
+    # Pour compter, il vaut mieux le faire après l'écriture pour ne pas déclencher deux "actions" Spark
+    inserted_count = to_insert_df.count()
+    print(f"✅ {inserted_count} nouvelle(s) ligne(s) insérée(s) dans 'etab'.")
 
-    to_insert.write.jdbc(url=db_url, table="etab", mode="ignore", properties=db_properties)
-    print(f"Inséré {to_insert.count()} nouvelles lignes dans 'etab'.")
+    # --- FIN DE LA LOGIQUE ---
 
-    # --- ÉTAPE DE DIAGNOSTIC --- (optionnel)
-    print("--- Verifying data in 'etab' table from Spark ---")
-    etab_with_ids_df = spark.read.jdbc(url=db_url, table="etab", properties=db_properties)
-    print(f"Found {etab_with_ids_df.count()} rows in 'etab' table after write.")
+    # --- ÉTAPE DE DIAGNOSTIC ---
+    print("--- Vérification des données dans la table 'etab' depuis Spark ---")
+    etab_from_db_df = spark.read.jdbc(url=db_url, table="etab", properties=db_properties)
+    print(f"Il y a maintenant {etab_from_db_df.count()} lignes au total dans la table 'etab'.")
 
     # === 2.2 Get Generated IDs ===
-    etab_with_ids_df = etab_with_ids_df.select("id_etab", "google_place_id")
+    etab_with_ids_df = etab_from_db_df.select("id_etab", "google_place_id")
 
     # === 2.3 Options ===
     option_cols = [
@@ -274,41 +299,55 @@ def main():
 
     # === 2.5 Opening Periods ===
     if "regularOpeningHours" in google_df.columns:
-        opening_periods_source_df = google_df.filter(
-            col("regularOpeningHours.periods").isNotNull()
-        )
-        if not opening_periods_source_df.rdd.isEmpty():
-            opening_periods_df = (
-                opening_periods_source_df.select(
-                    col("name").alias("google_place_id"),
-                    explode("regularOpeningHours.periods").alias("period"),
-                )
-                .select(
-                    "google_place_id",
-                    col("period.open.day").cast(IntegerType()).alias("open_day"),
-                    col("period.open.hour").cast(IntegerType()).alias("open_hour"),
-                    col("period.open.minute").cast(IntegerType()).alias("open_minute"),
-                    col("period.close.day").cast(IntegerType()).alias("close_day"),
-                    col("period.close.hour").cast(IntegerType()).alias("close_hour"),
-                    col("period.close.minute").cast(IntegerType()).alias("close_minute"),
-                )
-                .join(etab_with_ids_df, "google_place_id")
-                .drop("google_place_id")
-            )
+        print("Traitement des périodes d'ouverture...")
+        
+        # 1. Isoler les données nécessaires et filtrer en amont
+        hours_to_process = google_df.select(
+            col("name").alias("google_place_id"),
+            col("regularOpeningHours")
+        ).filter(col("regularOpeningHours.periods").isNotNull())
 
+        # 2. Joindre AVANT d'exploser pour récupérer la clé étrangère (id_etab)
+        # On utilise une jointure "inner" pour ne garder que les horaires des établissements
+        # qui ont bien été insérés dans la table "etab".
+        hours_with_fk = hours_to_process.join(
+            etab_with_ids_df,
+            "google_place_id",
+            "inner"
+        )
+
+        # 3. Exploser les périodes et sélectionner les colonnes finales
+        # Maintenant, chaque période est directement associée au bon "id_etab"
+        opening_periods_df = (
+            hours_with_fk.select(
+                "id_etab", # On utilise directement la clé étrangère
+                explode("regularOpeningHours.periods").alias("period")
+            )
+            .select(
+                col("id_etab"),
+                col("period.open.day").cast(IntegerType()).alias("open_day"),
+                col("period.open.hour").cast(IntegerType()).alias("open_hour"),
+                col("period.open.minute").cast(IntegerType()).alias("open_minute"),
+                col("period.close.day").cast(IntegerType()).alias("close_day"),
+                col("period.close.hour").cast(IntegerType()).alias("close_hour"),
+                col("period.close.minute").cast(IntegerType()).alias("close_minute"),
+            )
+        )
+
+        # 4. Écrire en base de données
+        inserted_count = opening_periods_df.count()
+        if inserted_count > 0:
             opening_periods_df.write.jdbc(
                 url=db_url,
                 table="opening_period",
-                mode="ignore",
+                mode="append",
                 properties=db_properties,
             )
-            print(
-                f"Successfully wrote {opening_periods_df.count()} new rows to 'opening_period' table."
-            )
+            print(f"✅ {inserted_count} nouvelle(s) ligne(s) insérée(s) dans 'opening_period'.")
         else:
-            print("No new data with opening periods to insert.")
+            print("Aucune nouvelle période d'ouverture à insérer.")
     else:
-        print("No 'regularOpeningHours' column found in source data.")
+        print("Aucune colonne 'regularOpeningHours' trouvée dans les données source.")
 
     spark.stop()
     print("--- Spark Job Finished ---")
