@@ -1,8 +1,74 @@
 import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, explode, input_file_name, regexp_replace, split, element_at
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, ArrayType, BooleanType, LongType
 from minio import Minio
 from src.database.models import init_db
+
+google_api_schema = StructType([
+    StructField("name", StringType(), True),
+    StructField("internationalPhoneNumber", StringType(), True),
+    StructField("formattedAddress", StringType(), True),
+    StructField("description", StringType(), True),
+    StructField("websiteUri", StringType(), True),
+    StructField("location", StructType([
+        StructField("latitude", DoubleType(), True),
+        StructField("longitude", DoubleType(), True)
+    ]), True),
+    StructField("rating", DoubleType(), True),
+    StructField("priceLevel", StringType(), True),
+    StructField("priceRange", StructType([
+        StructField("startPrice", StructType([StructField("units", StringType(), True)]), True),
+        StructField("endPrice", StructType([StructField("units", StringType(), True)]), True)
+    ]), True),
+    StructField("editorialSummary", StructType([StructField("text", StringType(), True)]), True),
+    StructField("displayName", StructType([StructField("text", StringType(), True)]), True),
+    StructField("allowsDogs", BooleanType(), True),
+    StructField("delivery", BooleanType(), True),
+    StructField("goodForChildren", BooleanType(), True),
+    StructField("goodForGroups", BooleanType(), True),
+    StructField("goodForWatchingSports", BooleanType(), True),
+    StructField("outdoorSeating", BooleanType(), True),
+    StructField("reservable", BooleanType(), True),
+    StructField("restroom", BooleanType(), True),
+    StructField("servesVegetarianFood", BooleanType(), True),
+    StructField("servesBrunch", BooleanType(), True),
+    StructField("servesBreakfast", BooleanType(), True),
+    StructField("servesDinner", BooleanType(), True),
+    StructField("servesLunch", BooleanType(), True),
+    StructField("reviews", ArrayType(StructType([
+        StructField("originalText", StructType([
+            StructField("languageCode", StringType(), True),
+            StructField("text", StringType(), True)
+        ]), True),
+        StructField("publishTime", StringType(), True),
+        StructField("rating", DoubleType(), True),
+        StructField("relativePublishTimeDescription", StringType(), True),
+        StructField("authorAttribution", StructType([StructField("displayName", StringType(), True)]), True)
+    ])), True),
+    StructField("regularOpeningHours", StructType([
+        StructField("periods", ArrayType(StructType([
+            StructField("open", StructType([
+                StructField("day", LongType(), True),
+                StructField("hour", LongType(), True),
+                StructField("minute", LongType(), True)
+            ]), True),
+            StructField("close", StructType([
+                StructField("day", LongType(), True),
+                StructField("hour", LongType(), True),
+                StructField("minute", LongType(), True)
+            ]), True)
+        ])), True)
+    ]), True)
+])
+
+pj_schema = StructType([
+    StructField("nom", StringType(), True),
+    StructField("adresse", StringType(), True),
+    StructField("tel", ArrayType(StringType()), True),
+    StructField("description", StringType(), True)
+])
+
 
 def ensure_bucket_exists(client, bucket_name):
     if not client.bucket_exists(bucket_name):
@@ -36,7 +102,7 @@ def main():
     # --- 1. Read Raw Data ---
     try:
         # CORRECTION : Lecture plus flexible des fichiers
-        google_df = spark.read.option("multiLine", "true").json("s3a://datalake/raw/API_google/")
+        google_df = spark.read.option("multiLine", "true").schema(google_api_schema).json("s3a://datalake/raw/API_google/")
         
         if google_df.rdd.isEmpty():
             print("No data found in MinIO. Exiting.")
@@ -44,7 +110,7 @@ def main():
             return
         print(f"Found {google_df.count()} records in MinIO.")
 
-        pj_df = spark.read.option("multiLine", "true").json(f"s3a://datalake/raw/page_jaune/") \
+        pj_df = spark.read.option("multiLine", "true").schema(pj_schema).json(f"s3a://datalake/raw/page_jaune/") \
             .withColumn("filename_full", element_at(split(input_file_name(), "/"), -1)) \
             .withColumn("filename", regexp_replace(col("filename_full"), ".json", ""))
         
@@ -58,10 +124,8 @@ def main():
         print(f"Error reading from MinIO: {e}. Exiting.")
         spark.stop()
         return
-    spark.stop()
-    print("--- Spark Job Finished ---")
+    
     # --- 2. Transform and Insert Data for Each Table ---
-"""
     # === 2.1 Etablissement ===
     etablissement_df = google_df.select(
         col("displayName.text").alias("nom"),
@@ -130,7 +194,8 @@ def main():
             
         opening_periods_df.write.jdbc(url=db_url, table="opening_period", mode="append", properties=db_properties)
         print(f"Successfully wrote {opening_periods_df.count()} new rows to 'opening_period' table.")
-"""
+    spark.stop()
+    print("--- Spark Job Finished ---")
 
 if __name__ == "__main__":
     main()
