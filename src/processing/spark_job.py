@@ -4,7 +4,9 @@ from pyspark.sql.functions import col, explode, input_file_name, regexp_replace,
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, ArrayType, BooleanType, LongType, FloatType, IntegerType
 from minio import Minio
 from src.database.models import init_db
+from functools import reduce
 
+# === Schémas ===
 google_api_schema = StructType([
     StructField("name", StringType(), True),
     StructField("internationalPhoneNumber", StringType(), True),
@@ -76,20 +78,27 @@ def ensure_bucket_exists(client, bucket_name):
     else:
         print(f"Bucket '{bucket_name}' already exists.")
 
+
 def main():
     # --- 0. Initialisation de la base de données ---
-    # S'assure que toutes les tables sont créées avant de continuer.
     init_db()
 
     print("--- Starting Spark Job ---")
-    
-    minio_client = Minio("minio:9000", access_key=os.getenv("AWS_ACCESS_KEY_ID"), secret_key=os.getenv("AWS_SECRET_KEY"), secure=False)
+
+    minio_client = Minio(
+        "minio:9000",
+        access_key=os.getenv("AWS_ACCESS_KEY_ID"),
+        secret_key=os.getenv("AWS_SECRET_KEY"),
+        secure=False,
+    )
     ensure_bucket_exists(minio_client, "datalake")
 
     # --- ÉTAPE DE DIAGNOSTIC ---
     print("--- Listing objects in MinIO directly ---")
     try:
-        objects = minio_client.list_objects("datalake", prefix="raw/API_google/", recursive=True)
+        objects = minio_client.list_objects(
+            "datalake", prefix="raw/API_google/", recursive=True
+        )
         object_list = [obj.object_name for obj in objects]
         if not object_list:
             print("MinIO client found NO objects in raw/API_google/")
@@ -100,123 +109,210 @@ def main():
     print("-----------------------------------------")
     # --- FIN DE L'ÉTAPE DE DIAGNOSTIC ---
 
-    spark = SparkSession.builder \
-        .appName("MinIO to Postgres") \
-        .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000") \
-        .config("spark.hadoop.fs.s3a.access.key", os.getenv("AWS_ACCESS_KEY_ID")) \
-        .config("spark.hadoop.fs.s3a.secret.key", os.getenv("AWS_SECRET_KEY")) \
-        .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+    spark = (
+        SparkSession.builder.appName("MinIO to Postgres")
+        .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000")
+        .config("spark.hadoop.fs.s3a.access.key", os.getenv("AWS_ACCESS_KEY_ID"))
+        .config("spark.hadoop.fs.s3a.secret.key", os.getenv("AWS_SECRET_KEY"))
+        .config("spark.hadoop.fs.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
         .getOrCreate()
+    )
 
     db_url = f"jdbc:postgresql://postgres:5432/{os.getenv('POSTGRES_DB')}"
-    db_properties = {"user": os.getenv("POSTGRES_USER"), "password": os.getenv("POSTGRES_PASSWORD"), "driver": "org.postgresql.Driver","tcpKeepAlive": "true"}
+    db_properties = {
+        "user": os.getenv("POSTGRES_USER"),
+        "password": os.getenv("POSTGRES_PASSWORD"),
+        "driver": "org.postgresql.Driver",
+        "tcpKeepAlive": "true",
+    }
 
     # --- 1. Read Raw Data ---
     try:
-        # CORRECTION : Lecture plus flexible des fichiers
-        google_df = spark.read.option("multiLine", "true").option("recursiveFileLookup", "true").schema(google_api_schema).json("s3a://datalake/raw/API_google/")
-        
+        # Lecture des données Google
+        google_df = (
+            spark.read.option("multiLine", "true")
+            .option("recursiveFileLookup", "true")
+            .schema(google_api_schema)
+            .json("s3a://datalake/raw/API_google/")
+        )
+
         if google_df.rdd.isEmpty():
             print("No data found in MinIO. Exiting.")
             spark.stop()
             return
         print(f"Found {google_df.count()} records in MinIO.")
 
-        pj_df = spark.read.option("multiLine", "true").option("recursiveFileLookup", "true").schema(pj_schema).json(f"s3a://datalake/raw/page_jaune/") \
-            .withColumn("filename_full", element_at(split(input_file_name(), "/"), -1)) \
+        # Lecture Page Jaune et jointure pour récupérer la description
+        pj_df = (
+            spark.read.option("multiLine", "true")
+            .option("recursiveFileLookup", "true")
+            .schema(pj_schema)
+            .json("s3a://datalake/raw/page_jaune/")
+            .withColumn("filename_full", element_at(split(input_file_name(), "/"), -1))
             .withColumn("filename", regexp_replace(col("filename_full"), ".json", ""))
-        
-        # Join to get description
-        google_df = google_df \
-            .withColumn("filename_full", element_at(split(input_file_name(), "/"), -1)) \
-            .withColumn("filename", regexp_replace(col("filename_full"), ".json", "")) \
-            .join(pj_df.select("filename", "description"), "filename", "left")
+        )
 
+        google_df = (
+            google_df.withColumn(
+                "filename_full", element_at(split(input_file_name(), "/"), -1)
+            )
+            .withColumn("filename", regexp_replace(col("filename_full"), ".json", ""))
+            .join(pj_df.select("filename", "description"), "filename", "left")
+        )
     except Exception as e:
         print(f"Error reading from MinIO: {e}. Exiting.")
         spark.stop()
         return
-    
+
     # --- 2. Transform and Insert Data for Each Table ---
     # === 2.1 Etablissement ===
-    etablissement_df = google_df.select(
-        col("displayName.text").alias("nom"),
-        col("internationalPhoneNumber"),
-        col("formattedAddress").alias("adresse"),
-        col("description"),
-        col("websiteUri"),
-        col("location.latitude").cast(FloatType()).alias("latitude"),
-        col("location.longitude").cast(FloatType()).alias("longitude"),
-        col("rating"),
-        col("priceLevel"),
-        col("priceRange.startPrice.units").cast(FloatType()).alias("start_price"),
-        col("priceRange.endPrice.units").cast(FloatType()).alias("end_price"),
-        col("editorialSummary.text").alias("editorialSummary_text"),
-        col("name").alias("google_place_id")
-    ).distinct()
-    
-    # CORRECTION : Utiliser le mode "ignore" pour éviter les erreurs de duplication
-    etablissement_df.write.jdbc(url=db_url, table="etab", mode="ignore", properties=db_properties)
-    print(f"Successfully wrote/ignored {etablissement_df.count()} rows to 'etab' table.")
+    etablissement_df = (
+        google_df.select(
+            col("displayName.text").alias("nom"),
+            col("internationalPhoneNumber"),
+            col("formattedAddress").alias("adresse"),
+            col("description"),
+            col("websiteUri"),
+            col("location.latitude").cast(FloatType()).alias("latitude"),
+            col("location.longitude").cast(FloatType()).alias("longitude"),
+            col("rating").cast(FloatType()),
+            col("priceLevel"),
+            col("priceRange.startPrice.units").cast(FloatType()).alias("start_price"),
+            col("priceRange.endPrice.units").cast(FloatType()).alias("end_price"),
+            col("editorialSummary.text").alias("editorialSummary_text"),
+            col("name").alias("google_place_id"),
+        ).distinct()
+    )
 
-    # --- ÉTAPE DE DIAGNOSTIC ---
+    # ANTI-DUPLICATION: lire les ids existants puis anti-join avant insert
+    existing_ids_df = spark.read.jdbc(
+        url=db_url,
+        table="(select google_place_id from etab) as et",
+        properties=db_properties,
+    )
+
+    to_insert = (
+        etablissement_df.dropDuplicates(["google_place_id"])\
+            .join(existing_ids_df, on="google_place_id", how="left_anti")
+    )
+
+    to_insert.write.jdbc(url=db_url, table="etab", mode="ignore", properties=db_properties)
+    print(f"Inséré {to_insert.count()} nouvelles lignes dans 'etab'.")
+
+    # --- ÉTAPE DE DIAGNOSTIC --- (optionnel)
     print("--- Verifying data in 'etab' table from Spark ---")
-    print(etablissement_df)
     etab_with_ids_df = spark.read.jdbc(url=db_url, table="etab", properties=db_properties)
     print(f"Found {etab_with_ids_df.count()} rows in 'etab' table after write.")
-    etab_with_ids_df.show(truncate=False)
-    # --- FIN DE L'ÉTAPE DE DIAGNOSTIC ---
 
     # === 2.2 Get Generated IDs ===
-    etab_with_ids_df = spark.read.jdbc(url=db_url, table="etab", properties=db_properties).select("id_etab", "google_place_id")
+    etab_with_ids_df = etab_with_ids_df.select("id_etab", "google_place_id")
 
     # === 2.3 Options ===
-    if "goodForChildren" in google_df.columns:
+    option_cols = [
+        "allowsDogs",
+        "delivery",
+        "goodForChildren",
+        "goodForGroups",
+        "goodForWatchingSports",
+        "outdoorSeating",
+        "reservable",
+        "restroom",
+        "servesVegetarianFood",
+        "servesBrunch",
+        "servesBreakfast",
+        "servesDinner",
+        "servesLunch",
+    ]
+    existing_option_cols = [c for c in option_cols if c in google_df.columns]
+
+    if existing_option_cols:
         options_df = google_df.select(
-            col("name").alias("google_place_id"),
-            col("allowsDogs"), col("delivery"), col("goodForChildren"), col("goodForGroups"),
-            col("goodForWatchingSports"), col("outdoorSeating"), col("reservable"), col("restroom"),
-            col("servesVegetarianFood"), col("servesBrunch"), col("servesBreakfast"),
-            col("servesDinner"), col("servesLunch")
-        ).join(etab_with_ids_df, "google_place_id").drop("google_place_id")
-        
-        options_df.write.jdbc(url=db_url, table="options", mode="ignore", properties=db_properties)
-        print(f"Successfully wrote/ignored {options_df.count()} rows to 'options' table.")
+            col("name").alias("google_place_id"), *[col(c) for c in existing_option_cols]
+        )
+        filter_condition = reduce(
+            lambda a, b: a | b, [col(c).isNotNull() for c in existing_option_cols]
+        )
+        options_df = options_df.filter(filter_condition)
+
+        if not options_df.rdd.isEmpty():
+            options_to_insert = options_df.join(
+                etab_with_ids_df, "google_place_id"
+            ).drop("google_place_id")
+            options_to_insert.write.jdbc(
+                url=db_url, table="options", mode="ignore", properties=db_properties
+            )
+            print(
+                f"Successfully wrote/ignored {options_to_insert.count()} rows to 'options' table."
+            )
+        else:
+            print("No rows with option data found to insert.")
+    else:
+        print("No option-related columns found in source data.")
 
     # === 2.4 Reviews ===
     if "reviews" in google_df.columns:
-        reviews_df = google_df.select(col("name").alias("google_place_id"), explode("reviews").alias("review")) \
+        reviews_df = (
+            google_df.select(col("name").alias("google_place_id"), explode("reviews").alias("review"))
             .select(
                 "google_place_id",
                 col("review.originalText.languageCode").alias("original_languageCode"),
                 col("review.originalText.text").alias("original_text"),
                 col("review.publishTime"),
-                col("review.rating").cast(FloatType()),
+                col("review.rating").cast(FloatType()).alias("rating"),
                 col("review.relativePublishTimeDescription"),
-                col("review.authorAttribution.displayName").alias("author")
-            ).join(etab_with_ids_df, "google_place_id").drop("google_place_id")
-        
-        reviews_df.write.jdbc(url=db_url, table="reviews", mode="append", properties=db_properties)
+                col("review.authorAttribution.displayName").alias("author"),
+            )
+            .join(etab_with_ids_df, "google_place_id")
+            .drop("google_place_id")
+        )
+
+        reviews_df.write.jdbc(
+            url=db_url, table="reviews", mode="ignore", properties=db_properties
+        )
         print(f"Successfully wrote {reviews_df.count()} new rows to 'reviews' table.")
 
     # === 2.5 Opening Periods ===
-    if "regularOpeningHours.periods" in google_df.columns:
-        opening_periods_df = google_df.select(col("name").alias("google_place_id"), explode("regularOpeningHours.periods").alias("period")) \
-            .select(
-                "google_place_id",
-                col("period.open.day").cast(IntegerType()).alias("open_day"),
-                col("period.open.hour").cast(IntegerType()).alias("open_hour"),
-                col("period.open.minute").cast(IntegerType()).alias("open_minute"),
-                col("period.close.day").cast(IntegerType()).alias("close_day"),
-                col("period.close.hour").cast(IntegerType()).alias("close_hour"),
-                col("period.close.minute").cast(IntegerType()).alias("close_minute")
-            ).join(etab_with_ids_df, "google_place_id").drop("google_place_id")
-            
-        opening_periods_df.write.jdbc(url=db_url, table="opening_period", mode="append", properties=db_properties)
-        print(f"Successfully wrote {opening_periods_df.count()} new rows to 'opening_period' table.")
+    if "regularOpeningHours" in google_df.columns:
+        opening_periods_source_df = google_df.filter(
+            col("regularOpeningHours.periods").isNotNull()
+        )
+        if not opening_periods_source_df.rdd.isEmpty():
+            opening_periods_df = (
+                opening_periods_source_df.select(
+                    col("name").alias("google_place_id"),
+                    explode("regularOpeningHours.periods").alias("period"),
+                )
+                .select(
+                    "google_place_id",
+                    col("period.open.day").cast(IntegerType()).alias("open_day"),
+                    col("period.open.hour").cast(IntegerType()).alias("open_hour"),
+                    col("period.open.minute").cast(IntegerType()).alias("open_minute"),
+                    col("period.close.day").cast(IntegerType()).alias("close_day"),
+                    col("period.close.hour").cast(IntegerType()).alias("close_hour"),
+                    col("period.close.minute").cast(IntegerType()).alias("close_minute"),
+                )
+                .join(etab_with_ids_df, "google_place_id")
+                .drop("google_place_id")
+            )
+
+            opening_periods_df.write.jdbc(
+                url=db_url,
+                table="opening_period",
+                mode="ignore",
+                properties=db_properties,
+            )
+            print(
+                f"Successfully wrote {opening_periods_df.count()} new rows to 'opening_period' table."
+            )
+        else:
+            print("No new data with opening periods to insert.")
+    else:
+        print("No 'regularOpeningHours' column found in source data.")
+
     spark.stop()
     print("--- Spark Job Finished ---")
+
 
 if __name__ == "__main__":
     main()
