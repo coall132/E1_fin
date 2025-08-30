@@ -88,7 +88,7 @@ def main():
     minio_client = Minio(
         "minio:9000",
         access_key=os.getenv("AWS_ACCESS_KEY_ID"),
-        secret_key=os.getenv("AWS_SECRET_KEY"),
+        secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         secure=False,
     )
     ensure_bucket_exists(minio_client, "datalake")
@@ -113,7 +113,7 @@ def main():
         SparkSession.builder.appName("MinIO to Postgres")
         .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000")
         .config("spark.hadoop.fs.s3a.access.key", os.getenv("AWS_ACCESS_KEY_ID"))
-        .config("spark.hadoop.fs.s3a.secret.key", os.getenv("AWS_SECRET_KEY"))
+        .config("spark.hadoop.fs.s3a.secret.key", os.getenv("AWS_SECRET_ACCESS_KEY"))
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
         .getOrCreate()

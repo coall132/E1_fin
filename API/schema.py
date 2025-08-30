@@ -1,6 +1,11 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_at: int
+    
 class OpeningPeriod(BaseModel):
     open_day: Optional[int]
     open_hour: Optional[int]
