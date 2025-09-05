@@ -54,9 +54,17 @@ def test_get_reviews(etab_id):
     print(r.status_code)
     print(json.dumps(r.json()[0], indent=2, ensure_ascii=False) if r.status_code==200 and r.json() else r.text)
 
+def test_errased(author,text):
+    payload = {"author": author, "text": text}
+    r = requests.post(f"{BASE_URL}/erase", json=payload, headers=auth_headers(), timeout=10)
+    print(r.status_code, r.text)
+    r.raise_for_status()
+    return r.json()
+
 if __name__ == "__main__":
     test_root()
     first_id = test_get_all_etablissements()
     test_get_one_etablissement(first_id)
     test_get_horaire(first_id)
     test_get_reviews(first_id)
+    test_errased("test","test")

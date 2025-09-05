@@ -36,7 +36,7 @@ def upload_data_to_minio(data: dict, object_name: str):
         tmp_path = tmp.name
     try:
         client.fput_object(BUCKET_NAME, object_name, tmp_path, content_type="application/json")
-        print(f"  -> Upload réussi : {object_name}")
+        print(f"Upload réussi : {object_name}")
     finally:
         os.remove(tmp_path)
 
@@ -52,8 +52,8 @@ def get_existing_files(prefix: str) -> set:
 
 # --- SCRIPT PRINCIPAL ---
 def main():
-    liste_departement = [49,72,61,27,78,91,92,93,94,77,89,58,3,23,87,86,79]
-    liste_activite = ["musée"] #musée(41,45,28,18,36,37), hotel
+    liste_departement = [37]
+    liste_activite = ["restaurant"] 
     
     print("--- Démarrage de l'extraction de données (Local) ---")
     

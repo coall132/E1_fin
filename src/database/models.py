@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Text, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Text, ForeignKey, DateTime, func
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 Base = declarative_base()
@@ -72,6 +72,11 @@ class OpeningPeriod(Base):
     close_minute = Column(Integer)
     # Relation inverse
     etab = relationship("Etablissement", back_populates="opening_periods")
+
+class Tombstone(Base):
+    __tablename__ = "tombstone"
+    key = Column(String, primary_key=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 def init_db():
     """Crée toutes les tables dans la base de données si elles n'existent pas."""

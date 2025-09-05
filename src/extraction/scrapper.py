@@ -29,9 +29,7 @@ def find_num_addr(soup, liste_resultat):
             
             name = name_tag.text.strip()
             
-            # --- CORRECTION : Nettoyage de l'adresse ---
             full_address_text = addr_tag.text.strip()
-            # Supprime "Voir le plan" et les espaces superflus à la fin
             addr = full_address_text.split("Voir le plan")[0].strip()
 
             num_fin = [num.text.strip() for num in res.select('.number-contact span') if num.text.strip()]
@@ -39,7 +37,7 @@ def find_num_addr(soup, liste_resultat):
             description = description_tag.text.strip() if description_tag else None
 
             liste_resultat.append({
-                "nom": name, "adresse": addr, # On utilise l'adresse nettoyée
+                "nom": name, "adresse": addr,
                 "tel": num_fin if num_fin else None, "description": description
             })
         except Exception:

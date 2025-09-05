@@ -4,11 +4,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import os
+from sqlalchemy import select, update, delete,insert 
 
 import CRUD
 import models
 import schema
 from database import engine, get_db
+import utils
+import embed
 
 app = FastAPI(
     title="API Restaurants",
@@ -78,3 +81,30 @@ def read_etablissement_reviews(
     _sub: str = Depends(CRUD.get_current_subject),
 ):
     return CRUD.get_reviews(db, etab_id=etab_id)
+
+@app.post("/erase")
+def erase_review(req: models.EraseIn, db: Session):
+    key = utils.make_review_key(req.author, req.text)
+
+    q = select(models.Review).where(models.Review.author == key)
+    row = db.execute(q).scalar_one_or_none()
+
+    if row is None:
+        stmt = insert(models.Tombstone).values(review_key=key)
+        stmt = stmt.on_conflict_do_nothing(index_elements=["review_key"])
+        db.execute(stmt)
+        db.commit()
+        return {"status": "queued", "message": "clé bloquée pour futures ingestions"}
+
+    etab_id = row.id_etab
+
+    db.execute(delete(models.Review).where(models.Review.review_key == key))
+    db.commit()
+
+    vec = embed.embed_one(id_etab=etab_id)
+
+    stmt = insert(models.Tombstone).values(review_key=key)
+    stmt = stmt.on_conflict_do_nothing(index_elements=["review_key"])
+    db.execute(stmt)
+    db.commit()
+    return {"status": "done", "etab_id": etab_id}

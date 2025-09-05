@@ -86,7 +86,7 @@ def validate_result(scraped_item, google_details):
     return False
 
 
-def make_api_request(scraped_item):
+def make_api_request(scraped_item,place_id = None):
     """Fait une requête à l'API Google Places et valide le résultat."""
     API_KEY = os.getenv("GOOGLE_KEY")
     nom = scraped_item.get("nom")
@@ -95,11 +95,10 @@ def make_api_request(scraped_item):
     if not API_KEY:
         print("Erreur: La variable d'environnement GOOGLE_KEY n'est pas définie.")
         return None
-
-    place_id = None
     
     # --- Première requête: Find Place ---
-    if not check_and_update_request_count(): return None
+    if not check_and_update_request_count(): 
+        return None
         
     url_search = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json"
     params = {"input": f"{nom} {adresse}", "inputtype": "textquery", "fields": "place_id", "key": API_KEY}
@@ -108,16 +107,14 @@ def make_api_request(scraped_item):
         response_search = requests.get(url_search, params=params)
         response_search.raise_for_status()
         data_search = response_search.json()
-        # --- LIGNE DE DÉBOGAGE ---
-        print(f"  -> Réponse de l'API Google : {data_search}")
-        
+        print(f"Réponse de l'API Google : {data_search}")    
         if data_search.get("candidates"):
             place_id = data_search["candidates"][0]["place_id"]
         else:
-            print(f"  -> Aucun 'place_id' trouvé pour {nom}.")
+            print(f"Aucun 'place_id' trouvé pour {nom}.")
             return None
     except requests.exceptions.RequestException as e:
-        print(f"  -> Erreur lors de la recherche du lieu : {e}")
+        print(f"Erreur lors de la recherche du lieu : {e}")
         return None
 
     # --- Deuxième requête: Place Details ---
@@ -134,12 +131,12 @@ def make_api_request(scraped_item):
             
             # --- ÉTAPE DE VALIDATION ---
             if validate_result(scraped_item, google_details):
-                return google_details # On retourne les données seulement si la validation est bonne
+                return google_details
             else:
-                return None # Sinon, on considère que ce n'est pas le bon établissement
+                return None 
 
         except requests.exceptions.RequestException as e:
-            print(f"  -> Erreur lors de la récupération des détails du lieu : {e}")
+            print(f"Erreur lors de la récupération des détails du lieu : {e}")
             return None
             
     return None

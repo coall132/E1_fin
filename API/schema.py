@@ -83,3 +83,7 @@ class EtablissementWithOptions(EtablissementBase):
 
     class Config:
         orm_mode = True
+
+class EraseIn(BaseModel):
+    author: str
+    text: str

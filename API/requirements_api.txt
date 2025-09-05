@@ -4,3 +4,5 @@ uvicorn[standard]
 psycopg2-binary
 sqlalchemy
 python-jose[cryptography]
+sentence_transformers
+numpy

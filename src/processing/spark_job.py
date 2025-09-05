@@ -5,6 +5,7 @@ from pyspark.sql.types import StructType, StructField, StringType, DoubleType, A
 from minio import Minio
 from src.database.models import init_db
 from functools import reduce
+import API.utils
 
 # === Schémas ===
 google_api_schema = StructType([
@@ -80,11 +81,8 @@ def ensure_bucket_exists(client, bucket_name):
 
 
 def main():
-    # --- 0. Initialisation de la base de données ---
     init_db()
-
     print("--- Starting Spark Job ---")
-
     minio_client = Minio(
         "minio:9000",
         access_key=os.getenv("AWS_ACCESS_KEY_ID"),
@@ -92,7 +90,6 @@ def main():
         secure=False,
     )
     ensure_bucket_exists(minio_client, "datalake")
-
     # --- ÉTAPE DE DIAGNOSTIC ---
     print("--- Listing objects in MinIO directly ---")
     try:
@@ -275,10 +272,24 @@ def main():
         print("Aucune colonne relative aux options trouvée dans les données source.")
 
     # === 2.4 Reviews ===
+    try:
+        tombstone_df = (
+            spark.read.jdbc(url=db_url, table="tombstone", properties=db_properties)
+            .select("key").distinct()
+        )
+        print(f"Tombstones chargées: {tombstone_df.count()} clés.")
+    except Exception:
+        print("Table 'tombstone' absente (pas de blocage RGPD).")
+        tombstone_df = spark.createDataFrame(
+            [], StructType([StructField("key", StringType(), True)])
+        )
+
     print("Traitement de la table 'reviews'...")
     if "reviews" in google_df.columns:
-        reviews_df = (
-            google_df.select(col("name").alias("google_place_id"), explode("reviews").alias("review"))
+        # 1) Aplatir + calculer la clé hash (author+text)
+        reviews_raw_df = (
+            google_df
+            .select(col("name").alias("google_place_id"), explode("reviews").alias("review"))
             .select(
                 "google_place_id",
                 col("review.originalText.languageCode").alias("original_languageCode"),
@@ -288,26 +299,36 @@ def main():
                 col("review.relativePublishTimeDescription"),
                 col("review.authorAttribution.displayName").alias("author"),
             )
-            .join(etab_with_ids_df, "google_place_id")
-            .drop("google_place_id")
+            # UDF déjà dispo chez toi: API.utils.make_review_key(author, original_text)
+            .withColumn("key", API.utils.make_review_key(col("author"), col("original_text")))
         )
 
-        # --- Logique anti-doublons pour 'reviews' ---
-        # Clé unique composite : un même auteur ne peut pas poster 2 avis au même endroit à la même milliseconde
+        # 2) Exclure les avis tombstonés (left_anti sur la clé)
+        reviews_raw_df = reviews_raw_df.join(tombstone_df, on="key", how="left_anti")
+
+        # 3) Ajouter la FK puis DROP l'auteur clair et RENOMMER key -> author
+        reviews_df = (
+            reviews_raw_df
+            .join(etab_with_ids_df, "google_place_id")
+            .drop("google_place_id")
+            .drop("author")                      # on supprime l'auteur en clair
+            .withColumnRenamed("key", "author")  # on écrit le hash dans la colonne author
+        )
+
+        # 4) Anti-doublons sur (id_etab, author(hash), publishTime)
         unique_keys = ["id_etab", "author", "publishTime"]
         try:
             existing_reviews_df = spark.read.jdbc(
-                url=db_url, table=f"(select {', '.join(unique_keys)} from reviews) as rev", properties=db_properties
+                url=db_url,
+                table=f"(select {', '.join(unique_keys)} from reviews) as rev",
+                properties=db_properties,
             )
         except Exception:
-            print("La table 'reviews' est probablement vide. On continue...")
             existing_reviews_df = spark.createDataFrame([], reviews_df.select(*unique_keys).schema)
 
-        final_reviews_to_insert = reviews_df.join(
-            existing_reviews_df, on=unique_keys, how="left_anti"
-        )
-        # --- Fin de la logique anti-doublons ---
+        final_reviews_to_insert = reviews_df.join(existing_reviews_df, on=unique_keys, how="left_anti")
 
+        # 5) Insertion
         inserted_count = final_reviews_to_insert.count()
         if inserted_count > 0:
             final_reviews_to_insert.write.jdbc(
@@ -315,7 +336,7 @@ def main():
             )
             print(f"✅ {inserted_count} nouvelle(s) ligne(s) insérée(s) dans 'reviews'.")
         else:
-            print("Aucun nouvel avis à insérer.")
+            print("Aucun nouvel avis à insérer (après tombstone & anti-doublon).")
 
     # === 2.5 Opening Periods ===
     if "regularOpeningHours" in google_df.columns:
