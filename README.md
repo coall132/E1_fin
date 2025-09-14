@@ -31,5 +31,5 @@ Pour que tout fonctionne plusieurs étape sont à prévoir :
 
 Voila profiter des données
 
-Pour acceder à l'API aller sur l'endpoint 8000
+Pour acceder à l'API aller sur le port 8000
 
