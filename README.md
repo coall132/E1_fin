@@ -23,7 +23,7 @@ Pour que tout fonctionne plusieurs étape sont à prévoir :
 
     4 - Installer Docker Desktop
 
-    5 - Ensuite pour profiter du service :
+    5 - Ensuite pour profiter du service aller dans le dossier cloner :
         A - Créer un reseau avec la commande : docker network create data_network 
         A - lancer le docker avec : docker compose up --build -d
         B - lancer (à l'exterieur du docker) et dans le dossier extraction (du repo) la commande : python -m extract_data.py
