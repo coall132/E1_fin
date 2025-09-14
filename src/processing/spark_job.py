@@ -327,7 +327,8 @@ def main():
             existing_reviews_df = spark.createDataFrame([], reviews_df.select(*unique_keys).schema)
 
         final_reviews_to_insert = reviews_df.join(existing_reviews_df, on=unique_keys, how="left_anti")
-
+        final_reviews_to_insert = final_reviews_to_insert.dropDuplicates(unique_keys)
+        
         # 5) Insertion
         inserted_count = final_reviews_to_insert.count()
         if inserted_count > 0:
